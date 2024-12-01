@@ -1,5 +1,7 @@
 # Roquefort - WebGPU fluid simulator
 
+Check it out at https://bercon.github.io/roquefort/
+
 ## Features
 
 * 3D fluid simulation implemented using WebGPU compute shaders
