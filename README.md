@@ -2,6 +2,8 @@
 
 Check it out at https://bercon.github.io/roquefort/
 
+https://github.com/user-attachments/assets/2bcbb8bd-96b8-4003-811c-610ef4ece250
+
 ## Features
 
 * 3D fluid simulation implemented using WebGPU compute shaders
