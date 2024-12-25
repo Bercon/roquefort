@@ -91,6 +91,7 @@ class UniformBuffer {
 
 class ComputeShader {
     constructor(label, device, code) {
+        this.label = label;
         this.pipeline = device.createComputePipeline({
             label,
             layout: 'auto',
@@ -107,6 +108,7 @@ class ComputeShader {
     computePass(device, pass, entries, dispatchX, dispatchY, dispatchZ) {
         pass.setPipeline(this.pipeline);
         pass.setBindGroup(0, device.createBindGroup({
+            label: this.label,
             layout: this.pipeline.getBindGroupLayout(0),
             entries: entries.map((element, i) => ({
                 binding: i,
@@ -130,7 +132,7 @@ class Timer {
 
     getTimeAndDelta(speed) {
         let now = performance.now();
-        let delta = Math.min(1000 / 60, now - this.prev) * speed;
+        let delta = Math.min(1000 / 1, now - this.prev) * speed;
         this.prev = now;
         this.currentTime += delta;
         return [this.currentTime / 1000, delta / 1000];

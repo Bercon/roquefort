@@ -59,7 +59,7 @@ function createSlider({parent, configuration, key, labelText, minValue, maxValue
         configuration.updateNumber(key, numberInput.value);
     });
 
-    rangeInput.addEventListener("change", function() {
+    rangeInput.addEventListener("input", function(e) {
         configuration.updateNumber(key, rangeInput.value);
     });
     configuration.addUserConfigNumber(key, defaultValue);
@@ -303,7 +303,7 @@ function createUI(config, configuration) {
     });
     createSelect({ parent: settingsSection, configuration,
         key: "scene", labelText: "Scene",
-        options: ["None", "Rotating smoke emitter", "Rotating fire emitter"].map(
+        options: ["None", "Rotating smoke emitter", "Rotating fire emitter", "5 spheres (uses brush settings)"].map(
             x => ({label: x, value: x})),
         defaultValue: "Rotating fire emitter"
     });
@@ -321,7 +321,7 @@ function createUI(config, configuration) {
         key: "gridSize", labelText: "Voxel resolution",
         options: [16, 32, 64, 96, 128, 192, 256, 384].map(
             x => ({label: x + String.fromCharCode(179), value: x + ""})),
-        defaultValue: 96
+        defaultValue: 128
     });
     createSlider({ parent: settingsSection, configuration,
         key: "speed", labelText: "Speed",
@@ -362,8 +362,8 @@ function createUI(config, configuration) {
         minValue: 1, maxValue: 200, defaultValue: 4.0, step: 0.1
     });
     createSlider({ parent: simSection, configuration,
-        key: "pressure_iterations", labelText: "Jacobi iterations",
-        minValue: 1, maxValue: 200, defaultValue: 50, step: 1
+        key: "pressure_iterations", labelText: "Solver iterations",
+        minValue: 2, maxValue: 200, defaultValue: 4, step: 1
     });
     createCheckbox({ parent: simSection, configuration,
         key: "enable_vorticity", labelText: "Enable vorticity",
@@ -371,7 +371,7 @@ function createUI(config, configuration) {
     });
     createSlider({ parent: simSection, configuration,
         key: "vorticity", labelText: "Vorticity amount",
-        minValue: 0, maxValue: 5, defaultValue: 1., step: 0.001
+        minValue: 0, maxValue: 50, defaultValue: 1., step: 0.001
     });
     createSlider({ parent: simSection, configuration,
         key: "velocityDecay", labelText: "Velocity decay",
@@ -380,10 +380,6 @@ function createUI(config, configuration) {
     createSlider({ parent: simSection, configuration,
         key: "smokeDecay", labelText: "Smoke decay",
         minValue: 0.0, maxValue: 10.0, defaultValue: 0.5, step: 0.001
-    });
-    createSlider({ parent: simSection, configuration,
-        key: "pressureDecay", labelText: "Pressure decay",
-        minValue: 0.0, maxValue: 10.0, defaultValue: 0.1, step: 0.001
     });
     createSlider({ parent: simSection, configuration,
         key: "temperatureDecay", labelText: "Temperature decay",
@@ -410,10 +406,6 @@ function createUI(config, configuration) {
         minValue: 0.0, maxValue: 10.0, defaultValue: 1, step: 0.01
     });
     createSlider({ parent: simSection, configuration,
-        key: "combustionExpansion", labelText: "Combustion expansion",
-        minValue: 0.0, maxValue: 500.0, defaultValue: 50, step: 0.01
-    });
-    createSlider({ parent: simSection, configuration,
         key: "boyancy", labelText: "Boyancy",
         minValue: 0, maxValue: 5, defaultValue: 1.0, step: 0.001
     });
@@ -431,6 +423,10 @@ function createUI(config, configuration) {
     createSlider({ parent: cameraSection, configuration,
         key: "camPosRadius", labelText: "Camera distance",
         minValue: 0.1, maxValue: 6.0, defaultValue: 2., step: 0.1
+    });
+    createSlider({ parent: cameraSection, configuration,
+        key: "orthoBlend", labelText: "Orthographic blend",
+        minValue: 0.0, maxValue: 1.0, defaultValue: 0., step: 0.01
     });
 
     // BRUSH SECTION
@@ -464,14 +460,24 @@ function createUI(config, configuration) {
             x => ({label: x, value: x})),
         defaultValue: "Normal"
     });
+    createSlider({ parent: debugSection, configuration,
+        key: "debugMultigridLevel", labelText: "Multigrid level",
+        minValue: 0, maxValue: 6, defaultValue: 0, step: 1
+    });
     createCheckbox({ parent: debugSection, configuration,
         key: "useRedBlackJacobi", labelText: "Red/Black Jacobi",
-        defaultValue: true
+        defaultValue: false
     });
-    // createTextField({ parent: debugSection, configuration,
-    //     key: "javascriptTime", labelText: "Javascript (ms)",
-    //     defaultValue: "",
-    //     userConfig: false,
-    //     disabled: true
-    // });
+    createSlider({ parent: debugSection, configuration,
+        key: "pressureDecay", labelText: "Pressure decay (if Jacobi solver)",
+        minValue: 0.0, maxValue: 10.0, defaultValue: 0.1, step: 0.001
+    });
+
+
+    createTextField({ parent: debugSection, configuration,
+        key: "javascriptTime", labelText: "Javascript (ms)",
+        defaultValue: "",
+        userConfig: false,
+        disabled: true
+    });
 }

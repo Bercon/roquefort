@@ -82,13 +82,13 @@ async function main() {
         camPosY: "f32",
         camPosZ: "f32",
         stepLength: "f32",
-        combustionExpansion: "f32",
         enclosed: "u32",
         emitterR: "f32",
         emitterG: "f32",
         emitterB: "f32",
         blackbodyBrightness: "f32",
         brushTemperatureAmount: "f32",
+        orthoBlend: "f32",
     });
 
     const lightProps = {
@@ -99,31 +99,86 @@ async function main() {
         lightB: "f32",
     }
 
+    const pressureUniform = {
+        i: "u32",
+        offsetCurrent: "u32",
+        offsetNext: "u32",
+        current: "u32",
+        next: "u32",
+        dx: "f32"
+    };
+
     const lightingPrimaryUni = new UniformBuffer(device, "light", "Light", lightProps);
     const lightingFillUni = new UniformBuffer(device, "light", "Light", lightProps);
-    const uniformEven = new UniformBuffer(device, "iter", "Iter", {  i: "u32" }, { i: 0 });
-    const uniformOdd = new UniformBuffer(device, "iter", "Iter", {  i: "u32" }, { i: 1 });
+    const uniformEven = new UniformBuffer(device, "iter", "Iter", pressureUniform, { i: 0, offsetCurrent: 0, offsetNext: 0, current: 0, next: 0, dx: 0 });
+    const uniformOdd = new UniformBuffer(device, "iter", "Iter", pressureUniform, { i: 1, offsetCurrent: 0, offsetNext: 0, current: 0, next: 0, dx: 0 });
 
     const uniformBuffer = uniforms.gpuBuffer;
 
     function createBuffers(config) {
+        // Only support multigrid levels where grid is still divisible by 4
+        let s = config.gridSize;
+        let level = 0;
+        while (s >= 4 && (s / 2) % 4 == 0) {
+            s /= 2;
+            level++;
+        }
+        config.multigridMaxLevel = level;
+        // console.log(`Max multigrid level ${config.multigridMaxLevel}`);
+
+        function multigridOffset(level, baseSize) {
+            let offset = 0;
+            let size = baseSize;
+            for (let i = 0; i < level; i++) {
+                offset = offset + size * size * size;
+                size = size / 2;
+            }
+            return offset;
+        }
+
+        let multigrid = [];
+        let offsetCurrent = 0;
+        let offsetNext = 0;
+        for (let level = 0; level <= config.multigridMaxLevel; level++) {
+            offsetCurrent = multigridOffset(level, config.gridSize);
+            offsetNext = multigridOffset(level + 1, config.gridSize);
+            size = config.gridSize / Math.pow(2, level);
+            sizeNext = config.gridSize / Math.pow(2, level + 1);
+            let rdx = size * config.simulation_scale;
+            let dx = 1 / rdx;
+            const shared = {
+                offsetCurrent,
+                offsetNext,
+                current: size,
+                next: sizeNext,
+                current: size,
+                dx: dx
+            }
+            multigrid.push(
+                {
+                    even: new UniformBuffer(device, "iter", "Iter", pressureUniform, { i: 0, ...shared }).gpuBuffer,
+                    odd: new UniformBuffer(device, "iter", "Iter", pressureUniform, { i: 1, ...shared }).gpuBuffer,
+                }
+            );
+            if (!Number.isInteger(shared.current)) throw new Error(`Not integer, multigrid cannot work: ${shared.current}`);
+            // console.log("multigrid", level, "current", shared.current, "next", shared.next, "offsets", offsetCurrent, offsetNext);
+        }
         return {
-            vorticity: createStorageBuffer(device, "vorticity", 1, config.gridX, config.gridY, config.gridZ),
-            divergence: createStorageBuffer(device, "divergence", 1, config.gridX, config.gridY, config.gridZ),
-            pressure: new DoubleStorageBuffer(device, "pressure", 1, config.gridX, config.gridY, config.gridZ),
-            lighting: createStorageBuffer(device, "lighting", 4, config.gridX, config.gridY, config.gridZ),
+            // Notes: 2 to store multigrid levels, Jacobi solver uses previous pressure as starting point so can't use "velocity.write" as temp buffer
+            pressure: createStorageBuffer(device, "pressure", 2, config.gridX, config.gridY, config.gridZ),
             // Note: Velocity is XYZ and Fuel amount, none of which are required for rendering
             velocity: new DoubleStorageBuffer(device, "velocity", 4, config.gridX, config.gridY, config.gridZ),
             temperature: new DoubleStorageBuffer(device, "temperature", 1, config.gridX, config.gridY, config.gridZ),
             // Note: Smoke is RGB and Amount
             smoke: new DoubleStorageBuffer(device, "smoke", 4, config.gridX, config.gridY, config.gridZ),
+            multigrid: multigrid
         }
-    } // (1 + 1 + 2 + 4 + 8 + 2 + 8) * 4
+    }
 
     function destroyBuffers(buffers) {
         if (!buffers) return;
         for (const [key, value] of Object.entries(buffers)) {
-            value.destroy();
+            if (value.destroy) value.destroy();
         }
     }
 
@@ -231,7 +286,6 @@ async function main() {
                 smokeB: config.smokeRgb[2],
                 boyancy: config.boyancy,
                 stepLength: config.stepLength,
-                combustionExpansion: config.combustionExpansion,
                 enclosed: config.enclosed ? 1 : 0,
                 mouseStartX: 0,
                 mouseStartY: 0,
@@ -241,7 +295,8 @@ async function main() {
                 emitterG: emitterRgb[1],
                 emitterB: emitterRgb[2],
                 blackbodyBrightness: config.blackbodyBrightness,
-                brushTemperatureAmount: config.brushTemperatureAmount
+                brushTemperatureAmount: config.brushTemperatureAmount,
+                orthoBlend: config.orthoBlend,
             }
 
             let mouseUpdate = false;
@@ -292,10 +347,17 @@ async function main() {
                     { buffer: buffers.velocity.read }, // Update in place
                     { buffer: buffers.smoke.read }, // Update in place
                 ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-            } else  if (config.scene == "Rotating fire emitter") {
+            } else if (config.scene == "Rotating fire emitter") {
                 computeShaders.rotatingFireEmitter.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
                     { buffer: buffers.velocity.read }, // Update in place
+                    { buffer: buffers.temperature.read }, // Update in place
+                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+            } else if (config.scene == "5 spheres (uses brush settings)") {
+                computeShaders.fiveSpheres.computePass(device, passEncoder, [
+                    { buffer: uniformBuffer },
+                    { buffer: buffers.velocity.read }, // Update in place
+                    { buffer: buffers.smoke.read }, // Update in place
                     { buffer: buffers.temperature.read }, // Update in place
                 ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
             }
@@ -308,50 +370,83 @@ async function main() {
                 { buffer: buffers.velocity.write },
                 { buffer: buffers.smoke.write },
                 { buffer: buffers.temperature.write },
-                { buffer: buffers.divergence },
             ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
             buffers.velocity.swap();
             buffers.smoke.swap();
             buffers.temperature.swap();
 
-            if (config.pressureDecay != 0.0) {
+            if (!config.useRedBlackJacobi) {
                 computeShaders.pressureClear.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
-                    { buffer: buffers.pressure.read }, // Update in place
+                    { buffer: buffers.pressure }, // Update in place
+                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+            } else if (config.pressureDecay != 0.0) {
+                computeShaders.pressureDecay.computePass(device, passEncoder, [
+                    { buffer: uniformBuffer },
+                    { buffer: buffers.pressure }, // Update in place
                 ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
             }
 
             computeShaders.divergence.computePass(device, passEncoder, [
                 { buffer: uniformBuffer },
                 { buffer: buffers.velocity.read },
-                { buffer: buffers.divergence },
+                { buffer: buffers.smoke.write }, // Reuse buffer
             ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
 
             if (config.useRedBlackJacobi) {
-                // Double amount of iterations, but half amount of processing each time
-                for (let i = 0; i < config.pressure_iterations * 2; i++) {
+                for (let i = 0; i < config.pressure_iterations; i++) {
                     computeShaders.jacobiRedBlack.computePass(device, passEncoder, [
                         { buffer: uniformBuffer },
-                        { buffer: buffers.pressure.read }, // Update in place
-                        { buffer: buffers.divergence },
+                        { buffer: buffers.pressure }, // Update in place
+                        { buffer: buffers.smoke.write }, // Reuse buffer
                         { buffer: (i % 2 == 0 ? uniformEven.gpuBuffer : uniformOdd.gpuBuffer) },
                     ], config.gridX / 4, config.gridY / 4, config.gridZ / 8); // half on z-axis
                 }
             } else {
-                for (let i = 0; i < config.pressure_iterations; i++) {
-                    computeShaders.jacobi.computePass(device, passEncoder, [
-                        { buffer: uniformBuffer },
-                        { buffer: buffers.pressure.read },
-                        { buffer: buffers.divergence },
-                        { buffer: buffers.pressure.write },
-                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-                    buffers.pressure.swap();
+                function solveLevel(level, iter) {
+                    let dispatch = config.gridSize / 4 / Math.pow(2, level);
+                    for (let i = 0; i < iter; i++) {
+                        let solver = computeShaders.solve;
+                        if (dispatch == 1) {
+                            solver = computeShaders.solveGroupSize442;
+                        }
+                        solver.computePass(device, passEncoder, [
+                            // { buffer: uniformBuffer },
+                            { buffer: buffers.pressure },
+                            { buffer: buffers.smoke.write }, // Reuse buffer
+                            { buffer: (i % 2 == 0 ? buffers.multigrid[level].even :buffers.multigrid[level].odd) },
+                        ], dispatch, dispatch, Math.max(1, dispatch / 2));
+                    }
+                }
+                function restrict(level, buffer) {
+                    let dispatch = config.gridX / 4 / Math.pow(2, level + 1);
+                    computeShaders.restrict.computePass(device, passEncoder, [
+                        { buffer: buffer },
+                        { buffer: buffers.multigrid[level].even },
+                    ], dispatch, dispatch, dispatch);
+                }
+                function relax(level, buffer) {
+                    let dispatch = config.gridX / 4 / Math.pow(2, level + 1);
+                    computeShaders.relax.computePass(device, passEncoder, [
+                        // { buffer: uniformBuffer },
+                        { buffer: buffer },
+                        { buffer: buffers.multigrid[level].even },
+                    ], dispatch, dispatch, dispatch);
+                }
+                // "V"-cycle
+                for (let level = 0; level < config.multigridMaxLevel; level++) {
+                    // TODO: Could solve couple times here, but unlikely to mean much?
+                    restrict(level, buffers.smoke.write); // Reuse buffer
+                }
+                for (let level = config.multigridMaxLevel; level >= 0; level--) {
+                    solveLevel(level, config.pressure_iterations);
+                    if (level >= 1) relax(level - 1, buffers.pressure);
                 }
             }
 
             computeShaders.gradientSubtract.computePass(device, passEncoder, [
                 { buffer: uniformBuffer },
-                { buffer: buffers.pressure.read },
+                { buffer: buffers.pressure },
                 { buffer: buffers.velocity.read }, // read/write
             ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
 
@@ -359,13 +454,13 @@ async function main() {
                 computeShaders.vorticity.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
                     { buffer: buffers.velocity.read },
-                    { buffer: buffers.vorticity },
+                    { buffer: buffers.temperature.write }, // Reuse temperature buffer
                 ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
 
                 computeShaders.vorticityConfinment.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
                     { buffer: buffers.velocity.read }, // read/write
-                    { buffer: buffers.vorticity },
+                    { buffer: buffers.temperature.write }, // Reuse temperature buffer
                 ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
             }
 
@@ -376,21 +471,21 @@ async function main() {
                     { buffer: uniformBuffer },
                     { buffer: lightingPrimaryUni.gpuBuffer },
                     { buffer: buffers.smoke.read },
-                    { buffer: buffers.lighting },
+                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
                 ], config.gridX / 8, config.gridY / 8);
 
                 computeShaders.lighting.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
                     { buffer: lightingFillUni.gpuBuffer },
                     { buffer: buffers.smoke.read },
-                    { buffer: buffers.lighting },
+                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
                 ], config.gridX / 8, config.gridY / 8);
 
                 computeShaders.bakeLighting.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
                     { buffer: buffers.smoke.read },
                     { buffer: buffers.temperature.read },
-                    { buffer: buffers.lighting },
+                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
                 ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
 
                 // RENDERING
@@ -399,7 +494,7 @@ async function main() {
                     { buffer: uniformBuffer },
                     context.getCurrentTexture().createView(),
                     // { buffer: buffers.smoke.read },
-                    { buffer: buffers.lighting },
+                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
                 ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
 
             } else if  (config.renderMode == "Fuel shaded") {
@@ -409,14 +504,14 @@ async function main() {
                     { buffer: uniformBuffer },
                     { buffer: lightingPrimaryUni.gpuBuffer },
                     { buffer: buffers.velocity.read },
-                    { buffer: buffers.lighting },
+                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
                 ], config.gridX / 8, config.gridY / 8);
 
                 computeShaders.lightingFuel.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
                     { buffer: lightingFillUni.gpuBuffer },
                     { buffer: buffers.velocity.read },
-                    { buffer: buffers.lighting },
+                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
                 ], config.gridX / 8, config.gridY / 8);
 
                 // RENDERING
@@ -425,7 +520,7 @@ async function main() {
                     { buffer: uniformBuffer },
                     context.getCurrentTexture().createView(),
                     { buffer: buffers.velocity.read },
-                    { buffer: buffers.lighting },
+                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
                 ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
 
 
@@ -443,15 +538,22 @@ async function main() {
                 computeShaders.renderPressure.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
                     context.getCurrentTexture().createView(),
-                    { buffer: buffers.pressure.read },
+                    { buffer: buffers.pressure },
+                    { buffer: buffers.multigrid[Math.min(config.multigridMaxLevel, config.debugMultigridLevel)].even },
                 ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
 
             } else if (config.renderMode == "Divergence") {
 
+                // computeShaders.fillGradient.computePass(device, passEncoder, [
+                //     { buffer: uniformBuffer },
+                //     { buffer: buffers.divergence },
+                // ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+
                 computeShaders.renderDivergence.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
                     context.getCurrentTexture().createView(),
-                    { buffer: buffers.divergence },
+                    { buffer: buffers.smoke.write }, // Reuse buffer
+                    { buffer: buffers.multigrid[Math.min(config.multigridMaxLevel, config.debugMultigridLevel)].even },
                 ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
 
             } else {

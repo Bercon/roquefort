@@ -67,6 +67,52 @@ function buildShadersEmitters({ device, computeShaders, source }) {
         temperature[index] += 5000. * spot * u.dt;
     }`);
 
+    computeShaders.fiveSpheres = new ComputeShader("fiveSpheres", device, /*wgsl*/`
+    ${source.common}
+    fn hue_to_rgb(h: f32) -> vec3<f32> {
+        // return abs(fract(h + vec3(0, 2. / 3., 1. / 3.)) * 6. - 3.);
+        return 0.5 + 0.5 * cos(h + vec3f(0,2,4));
+    }
+    @group(0) @binding(0) var<uniform> u : U;
+    @group(0) @binding(1) var<storage, read_write> velocity : array<vec4f>;
+    @group(0) @binding(2) var<storage, read_write> smoke : array<vec4f>;
+    @group(0) @binding(3) var<storage, read_write> temperature : array<f32>;
+    @compute @workgroup_size(4,4,4)
+    fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
+        if (global_id.x == 0 || global_id.y == 0 || global_id.z == 0
+            || global_id.x == u32(u.x - 1) || global_id.y == u32(u.y - 1) || global_id.z == u32(u.z - 1)) {
+            return;
+        }
+        let index = to_index(global_id);
+        let worldPos = (vec3f(global_id) / vec3f(u.x, u.y, u.z)) * 2. - 1.;
+        for (var i = 0; i < 5; i++) {
+            let phase = f32(i) * 1.;
+            let phaseZ = f32(i) * PI / 2.5 * 3.;
+            let radius = .5 + sin(u.t * 0.3) * .3;
+            let spherePos = vec3(
+                sin(u.t * 1.75 + phase) * radius,
+                cos(u.t * 1.75 + phase) * radius,
+                .6 * sin(u.t * 1.5 + phaseZ));
+            let prevSpherePos = vec3(
+                sin(u.t * 1.75 - u.dt + phase) * radius,
+                cos(u.t * 1.75 - u.dt + phase) * radius,
+                .6 * sin(u.t * 1.5 + phaseZ));
+            let dist = length(worldPos - spherePos);
+            let spot = sqrt(max(0., u.brushSize * 2. - dist)) * u.dt;
+            let col_incr = 0.15;
+            // let color = palette(u.t / 8., vec3(1), vec3(0.5), vec3(1), vec3(0, col_incr, col_incr*2.));
+            let color = hue_to_rgb(u.t * .2 + f32(i) * 1.);
+            let old = smoke[index];
+            let added = vec4f(color, spot * 2. * u.brushSmokeAmount);
+            smoke[index] = vec4(
+                mix(added.rgb, old.rgb, old.a / (added.a + old.a + 1e-10)),
+                old.a + added.a
+            );
+            velocity[index] += vec4f((spherePos - prevSpherePos) * u.brushVelocityAmount * 5, u.dt * 60. * u.brushFuelAmount) * spot * 60.;
+            temperature[index] += 500. * u.brushTemperatureAmount * spot * 60.;
+        }
+    }`);
+
 
     computeShaders.updateMouse = new ComputeShader("updateMouse", device, /*wgsl*/`
     ${source.common}
@@ -93,6 +139,8 @@ function buildShadersEmitters({ device, computeShaders, source }) {
             || global_id.x == u32(u.x - 1) || global_id.y == u32(u.y - 1) || global_id.z == u32(u.z - 1)) {
             return;
         }
+
+        // if (abs(f32(global_id.z - u.ux / 2)) > .1) { return; }
 
         let index = to_index(global_id);
 
@@ -124,19 +172,19 @@ function buildShadersEmitters({ device, computeShaders, source }) {
 
         let dist = distanceToLine(aPos, bPos, worldPos);
 
-        let spot = sqrt(max(0., u.brushSize - dist));
+        let spot = sqrt(max(0., u.brushSize - dist)) * u.dt;
         // let spot = max(0, 1. - length(worldPos) * 5.);
 
         let col_incr = 0.15;
         let color = palette(u.t / 8., vec3(1), vec3(0.5), vec3(1), vec3(0, col_incr, col_incr*2.));
         let old = smoke[index];
-        let added = vec4f(color, spot * 2. * u.dt * u.brushSmokeAmount);
+        let added = vec4f(color, spot * 2. * u.brushSmokeAmount);
         const epsilon = 1e-10;
         smoke[index] = vec4(
             mix(added.rgb, old.rgb, old.a / (added.a + old.a + epsilon)),
             old.a + added.a
         );
-        velocity[index] += vec4f((bPos - aPos) * u.brushVelocityAmount * 5, u.brushFuelAmount) * spot;
-        temperature[index] += 500. * u.brushTemperatureAmount * spot;
+        velocity[index] += vec4f((bPos - aPos) * u.brushVelocityAmount * 5, u.brushFuelAmount) * spot * 60.;
+        temperature[index] += 500. * u.brushTemperatureAmount * spot * 60.;
     }`);
 }

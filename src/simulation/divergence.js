@@ -21,7 +21,6 @@ function buildShadersDivergence({ device, computeShaders, source }) {
             if (global_id.y == u32(u.y - 1)) { ba *= -1.; }
             if (global_id.z == u32(u.z - 1)) { bo *= -1.; }
         }
-        // Add to existing divergence computed in advect step after burning gas expanding
-        div[to_index(global_id)] += 0.5 * u.rdx * ((ri - le) + (ba - fr) + (bo - to));
+        div[to_index(global_id)] = 0.5 * u.rdx * ((ri - le) + (ba - fr) + (bo - to));
     }`);
 }

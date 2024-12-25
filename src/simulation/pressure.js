@@ -53,7 +53,7 @@ function buildShadersPressure({ device, computeShaders, iterUniformStruct, sourc
         pressure[index] = (le + ri + fr + ba + to + bo + alpha * divergence[index]) * rBeta;
     }`);
 
-    computeShaders.pressureClear = new ComputeShader("pressureClear", device, /*wgsl*/`
+    computeShaders.pressureDecay = new ComputeShader("pressureDecay", device, /*wgsl*/`
     ${source.common}
     @group(0) @binding(0) var<uniform> u : U;
     @group(0) @binding(1) var<storage, read_write> pressure : array<f32>;
@@ -61,4 +61,87 @@ function buildShadersPressure({ device, computeShaders, iterUniformStruct, sourc
     fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
         pressure[to_index(global_id)] *= exp(-u.pressureDecay * u.dt);
     }`);
+
+    computeShaders.pressureClear = new ComputeShader("pressureClear", device, /*wgsl*/`
+    ${source.common}
+    @group(0) @binding(0) var<uniform> u : U;
+    @group(0) @binding(1) var<storage, read_write> pressure : array<f32>;
+    @compute @workgroup_size(4,4,4)
+    fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
+        // Clear multigrid pressure solution. Could just target the lowest level
+        // it's just simpler here to clear all except finest
+        pressure[u.ux * u.uy * u.uz + to_index(global_id)] = 0;
+    }`);
+
+    // MULTIGRID
+
+    computeShaders.restrict = new ComputeShader("restrict", device, /*wgsl*/`
+    ${iterUniformStruct}
+    ${source.pressure}
+    @group(0) @binding(0) var<storage, read_write> buffer : array<f32>;
+    @group(0) @binding(1) var<uniform> iter : Iter;
+    @compute @workgroup_size(4,4,4)
+    fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
+        let base = global_id * 2;
+        buffer[iter.offsetNext + to_index_dim(global_id, iter.next)] =
+            0.125 * (
+            buffer[iter.offsetCurrent + to_index_dim(base, iter.current)]
+            + buffer[iter.offsetCurrent + to_index_dim(base + vec3u(1,0,0), iter.current)]
+            + buffer[iter.offsetCurrent + to_index_dim(base + vec3u(0,1,0), iter.current)]
+            + buffer[iter.offsetCurrent + to_index_dim(base + vec3u(1,1,0), iter.current)]
+            + buffer[iter.offsetCurrent + to_index_dim(base + vec3u(0,0,1), iter.current)]
+            + buffer[iter.offsetCurrent + to_index_dim(base + vec3u(1,0,1), iter.current)]
+            + buffer[iter.offsetCurrent + to_index_dim(base + vec3u(0,1,1), iter.current)]
+            + buffer[iter.offsetCurrent + to_index_dim(base + vec3u(1,1,1), iter.current)]
+            );
+    }`);
+
+    computeShaders.relax = new ComputeShader("relax", device, /*wgsl*/`
+    ${iterUniformStruct}
+    ${source.pressure}
+    // @group(0) @binding(0) var<uniform> u : U;
+    @group(0) @binding(0) var<storage, read_write> buffer : array<f32>;
+    @group(0) @binding(1) var<uniform> iter : Iter;
+    @compute @workgroup_size(4,4,4)
+    fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
+        let base = global_id * 2;
+        let coarse = buffer[iter.offsetNext + to_index_dim(global_id, iter.next)];
+        buffer[iter.offsetCurrent + to_index_dim(base, iter.current)] = coarse;
+        buffer[iter.offsetCurrent + to_index_dim(base + vec3u(1,0,0), iter.current)] = coarse;
+        buffer[iter.offsetCurrent + to_index_dim(base + vec3u(0,1,0), iter.current)] = coarse;
+        buffer[iter.offsetCurrent + to_index_dim(base + vec3u(1,1,0), iter.current)] = coarse;
+        buffer[iter.offsetCurrent + to_index_dim(base + vec3u(0,0,1), iter.current)] = coarse;
+        buffer[iter.offsetCurrent + to_index_dim(base + vec3u(1,0,1), iter.current)] = coarse;
+        buffer[iter.offsetCurrent + to_index_dim(base + vec3u(0,1,1), iter.current)] = coarse;
+        buffer[iter.offsetCurrent + to_index_dim(base + vec3u(1,1,1), iter.current)] = coarse;
+    }`);
+
+    source.pressureSolver = /*wgsl*/`
+    ${iterUniformStruct}
+    ${source.pressure}
+    // @group(0) @binding(0) var<uniform> u : U;
+    @group(0) @binding(0) var<storage, read_write> pressure : array<f32>;
+    @group(0) @binding(1) var<storage, read> divergence : array<f32>;
+    @group(0) @binding(2) var<uniform> iter : Iter;
+    @compute @workgroup_size(4,4,4)
+    fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
+        let offset = (global_id.x + global_id.y + global_id.z + iter.i) % 2 ;
+        let global_id_w_offset = vec3(global_id.x, global_id.y, global_id.z * 2 + offset);
+        let index = iter.offsetCurrent + to_index_dim(global_id_w_offset, iter.current);
+        let base = vec3i(global_id_w_offset);
+        let le = pressure[iter.offsetCurrent + clamp_to_edge_dim(base - vec3(1,0,0), iter.current)];
+        let ri = pressure[iter.offsetCurrent + clamp_to_edge_dim(base + vec3(1,0,0), iter.current)];
+        let fr = pressure[iter.offsetCurrent + clamp_to_edge_dim(base - vec3(0,1,0), iter.current)];
+        let ba = pressure[iter.offsetCurrent + clamp_to_edge_dim(base + vec3(0,1,0), iter.current)];
+        let to = pressure[iter.offsetCurrent + clamp_to_edge_dim(base - vec3(0,0,1), iter.current)];
+        let bo = pressure[iter.offsetCurrent + clamp_to_edge_dim(base + vec3(0,0,1), iter.current)];
+        let alpha = -(iter.dx * iter.dx);
+        const rBeta = 1. / 6.0;
+        pressure[index] = (le + ri + fr + ba + to + bo + alpha * divergence[index]) * rBeta;
+    }`
+
+    computeShaders.solve = new ComputeShader("solve", device,
+        source.pressureSolver);
+    computeShaders.solveGroupSize442 = new ComputeShader("solveDim4", device,
+        source.pressureSolver.replace("@workgroup_size(4,4,4)", "@workgroup_size(4,4,2)"));
 }

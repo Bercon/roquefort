@@ -3,6 +3,7 @@ function buildSourceCommon({ uniformStruct, computeShaders, source }) {
     ${uniformStruct}
 
     const OPTICAL_DENSITY = 200.0;
+    const PI = radians(180);
 
     fn D(x: vec3f) -> vec3f { // By David Hoskins, MIT License https://www.shadertoy.com/view/4djSRW
         var p = fract(x * vec3(.1031, .1030, .0973));
@@ -98,6 +99,20 @@ function buildSourceCommon({ uniformStruct, computeShaders, source }) {
         ));
         let rayDirWorldSpace = cameraMatrix * rayDirCameraSpace;
         return normalize(rayDirWorldSpace);  // Return normalized ray direction
+    }
+    `;
+
+    source.pressure = /*wgsl*/`
+    fn to_index_dim(id: vec3u, dim: u32) -> u32 {
+        return id.x + id.y * dim + id.z * dim * dim;
+    }
+
+    fn clamp_to_edge_dim(id: vec3i, dim: u32) -> u32 {
+        return to_index_dim(vec3u(clamp(
+            id,
+            vec3i(0),
+            vec3i(vec3u(dim - 1))
+        )), dim);
     }
     `;
 }

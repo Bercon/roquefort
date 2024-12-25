@@ -8,7 +8,6 @@ function buildShadersAdvect({device, computeShaders, source}) {
     @group(0) @binding(4) var<storage, read_write> velocity_out : array<vec4f>;
     @group(0) @binding(5) var<storage, read_write> smoke_out : array<vec4f>;
     @group(0) @binding(6) var<storage, read_write> temperature_out : array<f32>;
-    @group(0) @binding(7) var<storage, read_write> divergence : array<f32>;
     @compute @workgroup_size(4,4,4)
     fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
         let index = to_index(global_id);
@@ -31,7 +30,6 @@ function buildShadersAdvect({device, computeShaders, source}) {
             velocity_out[index] = vec4f(0);
             smoke_out[index] = vec4f(0);
             temperature_out[index] = 0;
-            divergence[index] = 0;
             return;
         }
 
@@ -58,6 +56,5 @@ function buildShadersAdvect({device, computeShaders, source}) {
 
         temperature_out[index] = temperature;
         velocity_out[index] = velOut + gravityVec * temperature * u.boyancy * 1e-3 * u.dt;
-        divergence[index] = -u.combustionExpansion * burntFuelAmount;
     }`);
 }
