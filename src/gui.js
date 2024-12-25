@@ -386,6 +386,10 @@ function createUI(config, configuration) {
         minValue: 0.0, maxValue: 10.0, defaultValue: 1.0, step: 0.001
     });
     createSlider({ parent: simSection, configuration,
+        key: "pressureDecay", labelText: "Pressure decay",
+        minValue: 0.0, maxValue: 10.0, defaultValue: 2, step: 0.001
+    });
+    createSlider({ parent: simSection, configuration,
         key: "ignitionTemperature", labelText: "Ignition temperature",
         minValue: 0, maxValue: 6000, defaultValue: 400, step: 1
     });
@@ -468,12 +472,6 @@ function createUI(config, configuration) {
         key: "useRedBlackJacobi", labelText: "Red/Black Jacobi",
         defaultValue: false
     });
-    createSlider({ parent: debugSection, configuration,
-        key: "pressureDecay", labelText: "Pressure decay (if Jacobi solver)",
-        minValue: 0.0, maxValue: 10.0, defaultValue: 0.1, step: 0.001
-    });
-
-
     createTextField({ parent: debugSection, configuration,
         key: "javascriptTime", labelText: "Javascript (ms)",
         defaultValue: "",

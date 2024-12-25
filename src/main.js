@@ -370,22 +370,11 @@ async function main() {
                 { buffer: buffers.velocity.write },
                 { buffer: buffers.smoke.write },
                 { buffer: buffers.temperature.write },
+                { buffer: buffers.pressure },
             ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
             buffers.velocity.swap();
             buffers.smoke.swap();
             buffers.temperature.swap();
-
-            if (!config.useRedBlackJacobi) {
-                computeShaders.pressureClear.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: buffers.pressure }, // Update in place
-                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-            } else if (config.pressureDecay != 0.0) {
-                computeShaders.pressureDecay.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: buffers.pressure }, // Update in place
-                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-            }
 
             computeShaders.divergence.computePass(device, passEncoder, [
                 { buffer: uniformBuffer },

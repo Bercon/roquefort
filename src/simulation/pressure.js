@@ -53,26 +53,6 @@ function buildShadersPressure({ device, computeShaders, iterUniformStruct, sourc
         pressure[index] = (le + ri + fr + ba + to + bo + alpha * divergence[index]) * rBeta;
     }`);
 
-    computeShaders.pressureDecay = new ComputeShader("pressureDecay", device, /*wgsl*/`
-    ${source.common}
-    @group(0) @binding(0) var<uniform> u : U;
-    @group(0) @binding(1) var<storage, read_write> pressure : array<f32>;
-    @compute @workgroup_size(4,4,4)
-    fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
-        pressure[to_index(global_id)] *= exp(-u.pressureDecay * u.dt);
-    }`);
-
-    computeShaders.pressureClear = new ComputeShader("pressureClear", device, /*wgsl*/`
-    ${source.common}
-    @group(0) @binding(0) var<uniform> u : U;
-    @group(0) @binding(1) var<storage, read_write> pressure : array<f32>;
-    @compute @workgroup_size(4,4,4)
-    fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
-        // Clear multigrid pressure solution. Could just target the lowest level
-        // it's just simpler here to clear all except finest
-        pressure[u.ux * u.uy * u.uz + to_index(global_id)] = 0;
-    }`);
-
     // MULTIGRID
 
     computeShaders.restrict = new ComputeShader("restrict", device, /*wgsl*/`
