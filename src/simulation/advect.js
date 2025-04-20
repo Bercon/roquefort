@@ -22,7 +22,7 @@ function buildShadersAdvect({device, computeShaders, source}) {
         // let k2 = trilerp4(&velocity_in, worldPos - u.dt * u.rdx * k1);
         // var pos2 = worldPos - u.dt * u.rdx * (k1.xyz + k2.xyz) * 0.5;
 
-        let pos2 = vec3f(global_id.xyz) + .5 - u.dt * u.rdx * k1;
+        let pos2 = worldPos - u.dt * u.rdx * k1;
 
         if (u.enclosed == 0 && (pos2.x < -.5 || pos2.y < -.5 || pos2.z < -.5
             || pos2.x > u.x - .5
@@ -36,23 +36,16 @@ function buildShadersAdvect({device, computeShaders, source}) {
 
         let vel2 = trilerp4(&velocity_in, pos2);
 
-        let smoke = trilerp4(&smoke_in, pos2) * vec4(1, 1, 1, exp(-u.smokeDecay * u.dt));
+        var smoke = trilerp4(&smoke_in, pos2) * vec4(1, 1, 1, exp(-u.smokeDecay * u.dt));
         var temperature = trilerp1(&temperature_in, pos2) * exp(-u.temperatureDecay * u.dt);
         let burnAmount = select(0.0, u.burnRate * u.dt, temperature > u.ignitionTemperature);
         let velOut = vec4(vel2.xyz * exp(-u.velocityDecay * u.dt), max(0.0, vel2.w - burnAmount));
         let burntFuelAmount = vel2.w - velOut.w;
-        let smokeAmount = burntFuelAmount * u.burnSmokeEmit;
+        let emittedSmoke = burntFuelAmount * u.burnSmokeEmit;
 
         temperature += burntFuelAmount * u.burnHeatEmit;
-
-        const epsilon = 1e-10;
-        smoke_out[index] = vec4(mix(
-                smoke.rgb,
-                vec3(u.smokeR, u.smokeG, u.smokeB),
-                smokeAmount / (epsilon + smoke.a + smokeAmount)
-            ),
-            smoke.a + smokeAmount
-        );
+        smoke = add_smoke(smoke, vec4(u.smokeR, u.smokeG, u.smokeB, emittedSmoke));
+        smoke_out[index] = smoke;
         const gravityVec = vec4(0,0,1,0);
 
         temperature_out[index] = temperature;

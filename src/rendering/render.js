@@ -1,32 +1,16 @@
 function buildShadersRender({device, presentationFormat, computeShaders, iterUniformStruct, source}) {
     source.commonBoxRayIntersection = /*wgsl*/`
-    let random = D(vec3(vec2f(global_id.xy), u.t));
-    let screen = (vec2f(global_id.xy) - 0.5 + random.xy - vec2f(u.canvasX, u.canvasY) * .5) / u.canvasX;
 
-    let fov = radians(90.0);
+    if (global_id.x >= u32(u.canvasX) || global_id.y >= u32(u.canvasY)) { return; }
 
-    // let camPos = vec3f(sin(u.t * .25), cos(u.t * .25), 0.25) * 2.5;
-    var camPos = vec3f(u.camPosX, u.camPosY, u.camPosZ);
-    let camTarget = vec3f(0, 0, 0);
-    // let camRot = computeBasis(vec3(0, 0, 0) - camPos);
-    // let camDir = computeRayDirection(camRot, fov, screen);
-
-    let forward = normalize(camTarget - camPos);
-    let right = normalize(vec3f(forward.y, -forward.x, 0));
-    let up = cross(right, forward);
-    var uv = screen;
-    uv.y = -uv.y;
-    let ortho_offset = right * uv.x + up * uv.y;
-    let perspective_dir = normalize(forward + uv.x * right * tan(fov * 0.5) + uv.y * up * tan(fov * 0.5));
-    camPos = mix(camPos, camPos + ortho_offset * 2., u.orthoBlend);
-    let camDir = normalize(mix(perspective_dir, forward, u.orthoBlend));
+    let cameraRay = computeCameraRay(global_id);
 
     let boxMin = vec3f(-.5);
     let boxMax = vec3f(.5);
 
-    let invDir = 1.0 / camDir;
-    let tMinVec = (boxMin - camPos) * invDir;
-    let tMaxVec = (boxMax - camPos) * invDir;
+    let invDir = 1.0 / cameraRay.dir;
+    let tMinVec = (boxMin - cameraRay.pos) * invDir;
+    let tMaxVec = (boxMax - cameraRay.pos) * invDir;
     let t1 = min(tMinVec, tMaxVec);
     let t2 = max(tMinVec, tMaxVec);
     let tMin = max(t1.x, max(t1.y, t1.z));
@@ -34,7 +18,7 @@ function buildShadersRender({device, presentationFormat, computeShaders, iterUni
 
     var color = vec3f(0);
     if (tMax >= tMin) { // Hit
-        let hit = tMax * camDir + camPos; // Take the furtest hit
+        let hit = tMax * cameraRay.dir + cameraRay.pos; // Take the furtest hit
 
         var uvw = (hit - boxMin) / (boxMax - boxMin);
 
@@ -55,8 +39,19 @@ function buildShadersRender({device, presentationFormat, computeShaders, iterUni
             // normal = vec3<f32>(0.0, 0.0, sign(dir.z));
             color = select(darkGray, lightGray, i32(uvw.x) % 2 == i32(uvw.y) % 2);
         }
+        // color = vec3f(.02) * simplex(cameraRay.dir * 1.5) * (.5 + .5 * cameraRay.dir.z);
+        // color = vec3f(simplex(cameraRay.dir * 5.5));
+        // var asf = simplex(cameraRay.dir * 5.5);
+        // asf *= asf;
+        // color = vec3f(simplex(cameraRay.dir * 3 + asf));
+        // color = vec3f(sinplex(cameraRay.dir * 5.5));
 
-        let volumeColor = marchRay(camPos, camDir, max(0.0, tMin) + u.stepLength * random.z, tMax);
+        // var s = simplex(hit * 10 * (1 + abs(sin(u.t * .1))));
+        // var s = .5 + .5 * snoise3(hit * 10 * (1 + abs(sin(u.t * .1))));
+        // color = select(vec3f(1,0,0), vec3f(s), s >= 0.);
+        // color = vec3(1) * simplex(vec3(3.) * u.t) * simplex(vec3(6.) * u.t);
+
+        let volumeColor = marchRay(cameraRay.pos, cameraRay.dir, max(0.0, tMin) + u.stepLength * cameraRay.rand.z, tMax);
 
         color = mix(color, volumeColor.rgb, volumeColor.a);
     }
@@ -65,32 +60,39 @@ function buildShadersRender({device, presentationFormat, computeShaders, iterUni
     computeShaders.renderDefault = new ComputeShader("renderDefault", device, /*wgsl*/`
     ${source.common}
 
+    // TODO: "gaseous solid"
+    // if (s.a > 0.008) {
+    //     let asf = (s.a - 0.008);
+    //     s.a += asf * 25.;
+    //     s.a = min(1., s.a);
+    // }
+
     fn marchRay(origin: vec3<f32>, direction: vec3<f32>, start: f32, stop: f32) -> vec4f {
         var t: f32 = start;
-        var accumulated = vec4f(0);
-        while (t < stop && accumulated.a < 0.995) {
+        var result = vec3f(0);
+        var transparency = 1.;
+        while (t < stop) {
             let pos = origin + direction * t;
             let volumePos = (pos + .5) * vec3f(u.x, u.y, u.z) + 0.5;
             var s = trilerp4(&lighting, volumePos);
-            // var l = trilerp4(&lighting, volumePos);
-            s.a *= u.stepLength * OPTICAL_DENSITY;
-            s = vec4f(s.rgb * s.a , s.a); // Weight the added sample by density
-            accumulated += s * (1.0 - accumulated.a);
+            s.a *= OPTICAL_DENSITY * u.stepLength;
+            transparency *= exp(-s.a);
+            result += transparency * s.rgb * s.a;
             t += u.stepLength;
         }
-        return accumulated;
+        return vec4f(result, 1 - transparency);
     }
 
     @group(0) @binding(0) var<uniform> u : U;
-    @group(0) @binding(1) var tex: texture_storage_2d<${presentationFormat}, write>;
-    // @group(0) @binding(2) var<storage, read> smoke : array<vec4f>;
-    @group(0) @binding(2) var<storage, read> lighting : array<vec4f>;
-    // @group(0) @binding(4) var<storage, read> temperature : array<f32>;
+    // @group(0) @binding(1) var tex: texture_storage_2d<${presentationFormat}, write>;
+    @group(0) @binding(1) var<storage, read> lighting : array<vec4f>;
+    @group(0) @binding(2) var<storage, read_write> output : array<vec4f>;
     @compute @workgroup_size(8,8)
     fn main(@builtin(global_invocation_id) global_id: vec3u) {
         ${source.commonBoxRayIntersection}
-        color = pow(color, vec3f(1 / 1.8)) + random / 255.;
-        textureStore(tex, vec2<i32>(i32(global_id.x), i32(global_id.y)), vec4f(color, 1));
+        // color = pow(color, vec3f(1 / 1.8)) + cameraRay.rand / 255.;
+        // textureStore(tex, vec2<i32>(i32(global_id.x), i32(global_id.y)), vec4f(color, 1));
+        output[global_id.x + global_id.y * u32(u.canvasX)] = vec4f(color, 1);
     }`);
 
     computeShaders.renderFuel = new ComputeShader("renderFuel", device, /*wgsl*/`

@@ -50,8 +50,10 @@ function buildShadersVorticity({ device, computeShaders, source }) {
         let C = vorticity[index];
 
         var force = vec3f(abs(R) - abs(L), abs(T) - abs(B), abs(F) - abs(Ba));
-        const epsilon = 1e-10;
-        force = force / sqrt(dot(force, force) + epsilon);
+        var s = dot(force, force);
+        if (s > 0) {
+            force = force / sqrt(s);
+        }
         force *= u.vorticity * u.dt * C * u.dx;
 
         velocity[index] += vec4f(force, 0);

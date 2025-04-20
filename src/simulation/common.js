@@ -11,6 +11,77 @@ function buildSourceCommon({ uniformStruct, computeShaders, source }) {
         return fract((p.xxy + p.yxx) * p.zyx);
     }
 
+    fn sinplex(p: vec3f) -> f32 {
+        return .5
+            + .5 * (sin(p.x)
+            * sin(p.y * 1.5)
+            * sin(p.z * 2.5));
+    }
+
+    fn add_smoke(t: vec4f, p: vec4f) -> vec4f {
+        var w = p.a + t.a;
+        return select(
+            vec4(mix(p.rgb, t.rgb, t.a / w), w),
+            t,
+            w == 0
+        );
+    }
+
+    fn simplex(p: vec3f) -> f32 { // Simplex 3D noise
+        var s = floor(p + (p.x + p.y + p.z) / 3);
+        var x = p - s + (s.x + s.y + s.z) / 6;
+        var i = step(x.yzx, x);
+        var j = i * (1. - i.zxy);
+        i = 1 - i.zxy * (1 - i);
+        var a = x - j + 1. / 6;
+        var b = x - i + 1. / 3;
+        var c = x - .5;
+        var w = max(
+                .5 - vec4f(
+                dot(x, x),
+                dot(a, a),
+                    dot(b, b),
+                    dot(c, c)
+                )
+            , vec4f(0));
+        return
+            .5 + 20 * dot(
+            vec4f(
+                dot(1-2*D(s), x),
+                dot(1-2*D(s + j), a),
+                dot(1-2*D(s + i), b),
+                dot(1-2*D(s + 1), c)
+            ),
+            w * w * w * w
+        );
+        // var s = floor(p + (p.x + p.y + p.z) / 3);
+        // var x = p - s + (s.x + s.y + s.z) / 6;
+        // var i = step(x.yzx, x);
+        // var i1 = i * (1. - i.zxy);
+        // var i2 = 1 - i.zxy * (1 - i);
+        // var x1 = x - i1 + 1. / 6;
+        // var x2 = x - i2 + 1. / 3;
+        // var x3 = x - .5;
+        // var w = max(
+        //         .5 - vec4f(
+        //         dot(x, x),
+        //         dot(x1, x1),
+        //             dot(x2, x2),
+        //             dot(x3, x3)
+        //         )
+        //     , vec4f(0));
+        // return
+        //     .5 + 20 * dot(
+        //     vec4f(
+        //         dot(2*D(s)-1, x),
+        //         dot(2*D(s + i1)-1, x1),
+        //         dot(2*D(s + i2)-1, x2),
+        //         dot(2*D(s + 1)-1, x3)
+        //     ),
+        //     w * w * w * w
+        // );
+    }
+
     fn to_index(id: vec3u) -> u32 {
         return id.x + id.y * u.ux + id.z * u.ux * u.uy;
     }
@@ -79,26 +150,29 @@ function buildSourceCommon({ uniformStruct, computeShaders, source }) {
         return vec2<f32>(tMin, tMax);
     }
 
-    fn computeBasis(zDir: vec3<f32>) -> mat3x3<f32> {
-        let z = normalize(zDir);
-        let x = normalize(vec3<f32>(z.y, -z.x, 0.0));
-        let y = normalize(cross(z, x));
-        return mat3x3<f32>(x, y, z);
-    }
+    struct CameraRay {
+        pos: vec3f,
+        dir: vec3f,
+        rand: vec3f,
+    };
 
-    fn computeRayDirection(
-        cameraMatrix: mat3x3<f32>,
-        vFov: f32,
-        screenPos: vec2<f32>
-    ) -> vec3<f32> {
-        let tanHalfFov = tan(0.5 * vFov);
-        let rayDirCameraSpace = normalize(vec3<f32>(
-            screenPos.x * tanHalfFov,
-            screenPos.y * tanHalfFov,
-            1.0
-        ));
-        let rayDirWorldSpace = cameraMatrix * rayDirCameraSpace;
-        return normalize(rayDirWorldSpace);  // Return normalized ray direction
+    fn computeCameraRay(canvas: vec3u) -> CameraRay {
+        var ray: CameraRay;
+        ray.rand = D(vec3(vec2f(canvas.xy), u.t));
+        let screen = (vec2f(canvas.xy) - 0.5 + ray.rand.xy - vec2f(u.canvasX, u.canvasY) * .5) / u.canvasX;
+        let fov = radians(90.0);
+        ray.pos = vec3f(u.camPosX, u.camPosY, u.camPosZ);
+        let camTarget = vec3f(0, 0, 0);
+        let forward = normalize(camTarget - ray.pos);
+        let right = normalize(vec3f(forward.y, -forward.x, 0));
+        let up = cross(right, forward);
+        var uv = screen;
+        uv.y = -uv.y;
+        let orthoOffset = right * uv.x + up * uv.y - vec3(0, 0, (u.canvasX - u.canvasY) / u.canvasX * .5);
+        let perspective_dir = normalize(forward + uv.x * right * tan(fov * 0.5) + uv.y * up * tan(fov * 0.5));
+        ray.pos = mix(ray.pos, ray.pos + orthoOffset, u.orthoBlend);
+        ray.dir = normalize(mix(perspective_dir, forward, u.orthoBlend));
+        return ray;
     }
     `;
 

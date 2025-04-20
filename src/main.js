@@ -19,17 +19,25 @@ async function main() {
         ? navigator.gpu.getPreferredCanvasFormat()
         : 'rgba8unorm';
 
-    const MAX_RESOLUTION = 384;
+    const MAX_GRID_SIZE = 384;
+    // Cap at 4096 to get max 256MB viewport buffers, 2x 1GB seems excessive which you get at 8k or 8192x8192
+    let MAX_TEX_DIM = 4096;
+    const MAX_BUFFER_SIZE = Math.max(
+        MAX_GRID_SIZE * MAX_GRID_SIZE * MAX_GRID_SIZE * 4 * 4,
+        MAX_TEX_DIM * MAX_TEX_DIM * 4 * 4
+    );
     const device = await adapter?.requestDevice({
         requiredFeatures: presentationFormat === 'bgra8unorm' ? ['bgra8unorm-storage'] : [],
         requiredLimits: {
-            maxStorageBufferBindingSize: MAX_RESOLUTION * MAX_RESOLUTION * MAX_RESOLUTION * 4 * 4,
-            maxBufferSize: MAX_RESOLUTION * MAX_RESOLUTION * MAX_RESOLUTION * 4 * 4
+            maxStorageBufferBindingSize: MAX_BUFFER_SIZE,
+            maxBufferSize: MAX_BUFFER_SIZE
         },
     });
     if (!device) {
         throw new Error("<p>Couldn't get WebGPU device</p>");
     }
+
+    MAX_TEX_DIM = Math.min(MAX_TEX_DIM, device.limits.maxTextureDimension2D);
 
     // Get a WebGPU context from the canvas and configure it
     const canvas = document.querySelector('canvas');
@@ -78,6 +86,8 @@ async function main() {
         velocityDecay: "f32",
         canvasX: "f32",
         canvasY: "f32",
+        canvasiX: "i32",
+        canvasiY: "i32",
         camPosX: "f32",
         camPosY: "f32",
         camPosZ: "f32",
@@ -89,11 +99,14 @@ async function main() {
         blackbodyBrightness: "f32",
         brushTemperatureAmount: "f32",
         orthoBlend: "f32",
+        glowRadius: "i32",
+        glowStrength: "f32",
+        glowGamma: "f32",
     });
 
     const lightProps = {
         lightPrev: "f32",
-        lightDir: "f32",
+        lightDir: "i32",
         lightR: "f32",
         lightG: "f32",
         lightB: "f32",
@@ -171,6 +184,9 @@ async function main() {
             temperature: new DoubleStorageBuffer(device, "temperature", 1, config.gridX, config.gridY, config.gridZ),
             // Note: Smoke is RGB and Amount
             smoke: new DoubleStorageBuffer(device, "smoke", 4, config.gridX, config.gridY, config.gridZ),
+            original: createStorageBuffer(device, "original", 4, MAX_TEX_DIM, MAX_TEX_DIM, 1),
+            blurredA: createStorageBuffer(device, "blurredA", 4, MAX_TEX_DIM, MAX_TEX_DIM, 1),
+            blurredB: createStorageBuffer(device, "blurredB", 4, MAX_TEX_DIM, MAX_TEX_DIM, 1),
             multigrid: multigrid
         }
     }
@@ -184,12 +200,12 @@ async function main() {
 
     let bufferResolution = 0;
     let buffers = null;
-    let timer = new Timer();
 
     const computeShaders = {};
     const source = {};
     for (let shader of [
         'buildSourceCommon',
+        'buildShadersBlur',
         'buildShadersLighting',
         'buildShadersRender',
         'buildShadersAdvect',
@@ -218,19 +234,24 @@ async function main() {
         for (const entry of entries) {
             const width = entry.contentBoxSize[0].inlineSize;
             const height = entry.contentBoxSize[0].blockSize;
-            entry.target.width = Math.max(1, Math.min(width, device.limits.maxTextureDimension2D));
-            entry.target.height = Math.max(1, Math.min(height, device.limits.maxTextureDimension2D));
+            entry.target.width = Math.max(1, Math.min(width, MAX_TEX_DIM));
+            entry.target.height = Math.max(1, Math.min(height, MAX_TEX_DIM));
         }
     });
     resizeObserver.observe(canvas);
 
     const TIMING_INTERVAL = 100;
     const javascriptTimer = new RollingAverage(TIMING_INTERVAL);
-
+    let timer = new Timer();
     async function render() {
         try {
-            let [time, delta] = timer.getTimeAndDelta(config.speed);
             let startTime = performance.now();
+            let [timeFullFrame, deltaFullFrame] = timer.getTimeAndDelta(config.speed);
+            let renderOnThisFrame = false;
+
+            let delta = deltaFullFrame / config.subframes;
+            let time = timeFullFrame; // TODO: Not correct for subframes
+
             let emitterRgb = hsvToRgb([time * .1 % 1, .9, .7]);
             if (bufferResolution != config.gridSize) {
                 config.gridX = config.gridSize;
@@ -264,15 +285,17 @@ async function main() {
                 pressureDecay: config.pressureDecay,
                 vorticity: config.vorticity,
                 dt: delta,
-                t: time,
+                t: time, // TODO: Incorrect for subframes
                 brushSmokeAmount: config.brushSmokeAmount,
                 brushSize: config.brushSize,
-                brushFuelAmount: config.brushFuelAmount * Math.random(),
+                brushFuelAmount: config.brushFuelAmount * Math.random(), // TODO: Should take delta in account
                 smokeDecay: config.smokeDecay,
                 brushVelocityAmount: config.brushVelocityAmount,
                 velocityDecay: config.velocityDecay,
                 canvasX: canvas.width,
                 canvasY: canvas.height,
+                canvasiX: canvas.width,
+                canvasiY: canvas.height,
                 camPosX,
                 camPosY,
                 camPosZ,
@@ -297,11 +320,16 @@ async function main() {
                 blackbodyBrightness: config.blackbodyBrightness,
                 brushTemperatureAmount: config.brushTemperatureAmount,
                 orthoBlend: config.orthoBlend,
+                glowRadius: Math.round(config.glowRadius * canvas.width / 100) / 2, // / 2 because we run box blur twice
+                glowStrength: config.glowStrength,
+                glowGamma: config.glowGamma,
             }
+            // console.log("glow radius", Math.round(config.glowRadius * canvas.width / 100));
 
             let mouseUpdate = false;
             if (!viewControls.empty()) {
                 const events = viewControls.getMouseLine();
+                // TODO: Not correct with subframes
                 updatedProps = {
                     ...updatedProps,
                     mouseStartX: events[0].x / canvas.width,
@@ -316,255 +344,299 @@ async function main() {
 
             lightingPrimaryUni.update(device, {
                 lightPrev: 0, // Multiplier for previous light value
-                lightDir: 2., // left, right, top, bottom, forward, backward
+                lightDir: 5,
                 lightR: config.primaryLightColor[0] * config.primaryLightBrightness,
                 lightG: config.primaryLightColor[1] * config.primaryLightBrightness,
                 lightB: config.primaryLightColor[2] * config.primaryLightBrightness,
             });
             lightingFillUni.update(device, {
                 lightPrev: 1., // Multiplier for previous light value
-                lightDir: 0., // left, right, top, bottom, forward, backward
+                lightDir: 1,
                 lightR: config.fillLightColor[0] * config.fillLightBrightness,
                 lightG: config.fillLightColor[1] * config.fillLightBrightness,
                 lightB: config.fillLightColor[2] * config.fillLightBrightness,
             });
 
+            // await device.queue.onSubmittedWorkDone();
             const encoder = device.createCommandEncoder();
             const passEncoder = encoder.beginComputePass()
 
-            if (mouseUpdate) {
-                computeShaders.updateMouse.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: buffers.velocity.read }, // Update in place
-                    { buffer: buffers.smoke.read }, // Update in place
-                    { buffer: buffers.temperature.read }, // Update in place
-                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-            }
+            for (let subframe = 0; subframe < config.subframes; subframe++) {
+                renderOnThisFrame = subframe === config.subframes - 1;
 
-            if (config.scene == "Rotating smoke emitter") {
-                computeShaders.rotatingSmokeEmitter.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: buffers.velocity.read }, // Update in place
-                    { buffer: buffers.smoke.read }, // Update in place
-                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-            } else if (config.scene == "Rotating fire emitter") {
-                computeShaders.rotatingFireEmitter.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: buffers.velocity.read }, // Update in place
-                    { buffer: buffers.temperature.read }, // Update in place
-                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-            } else if (config.scene == "5 spheres (uses brush settings)") {
-                computeShaders.fiveSpheres.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: buffers.velocity.read }, // Update in place
-                    { buffer: buffers.smoke.read }, // Update in place
-                    { buffer: buffers.temperature.read }, // Update in place
-                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-            }
-
-            computeShaders.advect.computePass(device, passEncoder, [
-                { buffer: uniformBuffer },
-                { buffer: buffers.velocity.read },
-                { buffer: buffers.smoke.read },
-                { buffer: buffers.temperature.read },
-                { buffer: buffers.velocity.write },
-                { buffer: buffers.smoke.write },
-                { buffer: buffers.temperature.write },
-                { buffer: buffers.pressure },
-            ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-            buffers.velocity.swap();
-            buffers.smoke.swap();
-            buffers.temperature.swap();
-
-            computeShaders.divergence.computePass(device, passEncoder, [
-                { buffer: uniformBuffer },
-                { buffer: buffers.velocity.read },
-                { buffer: buffers.smoke.write }, // Reuse buffer
-            ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-
-            if (config.useRedBlackJacobi) {
-                for (let i = 0; i < config.pressure_iterations; i++) {
-                    computeShaders.jacobiRedBlack.computePass(device, passEncoder, [
+                if (mouseUpdate) {
+                    computeShaders.updateMouse.computePass(device, passEncoder, [
                         { buffer: uniformBuffer },
-                        { buffer: buffers.pressure }, // Update in place
-                        { buffer: buffers.smoke.write }, // Reuse buffer
-                        { buffer: (i % 2 == 0 ? uniformEven.gpuBuffer : uniformOdd.gpuBuffer) },
-                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 8); // half on z-axis
+                        { buffer: buffers.velocity.read }, // Update in place
+                        { buffer: buffers.smoke.read }, // Update in place
+                        { buffer: buffers.temperature.read }, // Update in place
+                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
                 }
-            } else {
-                function solveLevel(level, iter) {
-                    let dispatch = config.gridSize / 4 / Math.pow(2, level);
-                    for (let i = 0; i < iter; i++) {
-                        let solver = computeShaders.solve;
-                        if (dispatch == 1) {
-                            solver = computeShaders.solveGroupSize442;
-                        }
-                        solver.computePass(device, passEncoder, [
-                            // { buffer: uniformBuffer },
-                            { buffer: buffers.pressure },
+
+                if (config.scene == "Rotating smoke emitter") {
+                    computeShaders.rotatingSmokeEmitter.computePass(device, passEncoder, [
+                        { buffer: uniformBuffer },
+                        { buffer: buffers.velocity.read }, // Update in place
+                        { buffer: buffers.smoke.read }, // Update in place
+                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+                } else if (config.scene == "Rotating fire emitter") {
+                    computeShaders.rotatingFireEmitter.computePass(device, passEncoder, [
+                        { buffer: uniformBuffer },
+                        { buffer: buffers.velocity.read }, // Update in place
+                        { buffer: buffers.temperature.read }, // Update in place
+                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+                } else if (config.scene == "5 spheres (uses brush settings)") {
+                    computeShaders.fiveSpheres.computePass(device, passEncoder, [
+                        { buffer: uniformBuffer },
+                        { buffer: buffers.velocity.read }, // Update in place
+                        { buffer: buffers.smoke.read }, // Update in place
+                        { buffer: buffers.temperature.read }, // Update in place
+                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+                } else if (config.scene == "Vortex") {
+                    computeShaders.vortex.computePass(device, passEncoder, [
+                        { buffer: uniformBuffer },
+                        { buffer: buffers.velocity.read }, // Update in place
+                        { buffer: buffers.smoke.read }, // Update in place
+                        { buffer: buffers.temperature.read }, // Update in place
+                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+                } else if (config.scene == "Intro") {
+                    computeShaders.intro.computePass(device, passEncoder, [
+                        { buffer: uniformBuffer },
+                        { buffer: buffers.velocity.read }, // Update in place
+                        { buffer: buffers.smoke.read }, // Update in place
+                        { buffer: buffers.temperature.read }, // Update in place
+                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+                }
+
+                computeShaders.advect.computePass(device, passEncoder, [
+                    { buffer: uniformBuffer },
+                    { buffer: buffers.velocity.read },
+                    { buffer: buffers.smoke.read },
+                    { buffer: buffers.temperature.read },
+                    { buffer: buffers.velocity.write },
+                    { buffer: buffers.smoke.write },
+                    { buffer: buffers.temperature.write },
+                    { buffer: buffers.pressure },
+                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+                buffers.velocity.swap();
+                buffers.smoke.swap();
+                buffers.temperature.swap();
+
+                computeShaders.divergence.computePass(device, passEncoder, [
+                    { buffer: uniformBuffer },
+                    { buffer: buffers.velocity.read },
+                    { buffer: buffers.smoke.write }, // Reuse buffer
+                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+
+                if (config.useRedBlackJacobi) {
+                    for (let i = 0; i < config.pressure_iterations; i++) {
+                        computeShaders.jacobiRedBlack.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: buffers.pressure }, // Update in place
                             { buffer: buffers.smoke.write }, // Reuse buffer
-                            { buffer: (i % 2 == 0 ? buffers.multigrid[level].even :buffers.multigrid[level].odd) },
-                        ], dispatch, dispatch, Math.max(1, dispatch / 2));
+                            { buffer: (i % 2 == 0 ? uniformEven.gpuBuffer : uniformOdd.gpuBuffer) },
+                        ], config.gridX / 4, config.gridY / 4, config.gridZ / 8); // half on z-axis
+                    }
+                } else {
+                    function solveLevel(level, iter) {
+                        let dispatch = config.gridSize / 4 / Math.pow(2, level);
+                        for (let i = 0; i < iter; i++) {
+                            let solver = computeShaders.solve;
+                            if (dispatch == 1) {
+                                solver = computeShaders.solveGroupSize442;
+                            }
+                            solver.computePass(device, passEncoder, [
+                                // { buffer: uniformBuffer },
+                                { buffer: buffers.pressure },
+                                { buffer: buffers.smoke.write }, // Reuse buffer
+                                { buffer: (i % 2 == 0 ? buffers.multigrid[level].even :buffers.multigrid[level].odd) },
+                            ], dispatch, dispatch, Math.max(1, dispatch / 2));
+                        }
+                    }
+                    function restrict(level, buffer) {
+                        let dispatch = config.gridX / 4 / Math.pow(2, level + 1);
+                        computeShaders.restrict.computePass(device, passEncoder, [
+                            { buffer: buffer },
+                            { buffer: buffers.multigrid[level].even },
+                        ], dispatch, dispatch, dispatch);
+                    }
+                    function relax(level, buffer) {
+                        let dispatch = config.gridX / 4 / Math.pow(2, level + 1);
+                        computeShaders.relax.computePass(device, passEncoder, [
+                            // { buffer: uniformBuffer },
+                            { buffer: buffer },
+                            { buffer: buffers.multigrid[level].even },
+                        ], dispatch, dispatch, dispatch);
+                    }
+                    // "V"-cycle
+                    for (let level = 0; level < config.multigridMaxLevel; level++) {
+                        // TODO: Could solve couple times here, but unlikely to mean much?
+                        restrict(level, buffers.smoke.write); // Reuse buffer
+                    }
+                    for (let level = config.multigridMaxLevel; level >= 0; level--) {
+                        solveLevel(level, config.pressure_iterations);
+                        if (level >= 1) relax(level - 1, buffers.pressure);
                     }
                 }
-                function restrict(level, buffer) {
-                    let dispatch = config.gridX / 4 / Math.pow(2, level + 1);
-                    computeShaders.restrict.computePass(device, passEncoder, [
-                        { buffer: buffer },
-                        { buffer: buffers.multigrid[level].even },
-                    ], dispatch, dispatch, dispatch);
-                }
-                function relax(level, buffer) {
-                    let dispatch = config.gridX / 4 / Math.pow(2, level + 1);
-                    computeShaders.relax.computePass(device, passEncoder, [
-                        // { buffer: uniformBuffer },
-                        { buffer: buffer },
-                        { buffer: buffers.multigrid[level].even },
-                    ], dispatch, dispatch, dispatch);
-                }
-                // "V"-cycle
-                for (let level = 0; level < config.multigridMaxLevel; level++) {
-                    // TODO: Could solve couple times here, but unlikely to mean much?
-                    restrict(level, buffers.smoke.write); // Reuse buffer
-                }
-                for (let level = config.multigridMaxLevel; level >= 0; level--) {
-                    solveLevel(level, config.pressure_iterations);
-                    if (level >= 1) relax(level - 1, buffers.pressure);
-                }
-            }
 
-            computeShaders.gradientSubtract.computePass(device, passEncoder, [
-                { buffer: uniformBuffer },
-                { buffer: buffers.pressure },
-                { buffer: buffers.velocity.read }, // read/write
-            ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-
-            if (config.enable_vorticity) {
-                computeShaders.vorticity.computePass(device, passEncoder, [
+                computeShaders.gradientSubtract.computePass(device, passEncoder, [
                     { buffer: uniformBuffer },
-                    { buffer: buffers.velocity.read },
-                    { buffer: buffers.temperature.write }, // Reuse temperature buffer
-                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-
-                computeShaders.vorticityConfinment.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: buffers.velocity.read }, // read/write
-                    { buffer: buffers.temperature.write }, // Reuse temperature buffer
-                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-            }
-
-            if (config.renderMode == "Normal") {
-                // LIGHTING
-
-                computeShaders.lighting.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: lightingPrimaryUni.gpuBuffer },
-                    { buffer: buffers.smoke.read },
-                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
-                ], config.gridX / 8, config.gridY / 8);
-
-                computeShaders.lighting.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: lightingFillUni.gpuBuffer },
-                    { buffer: buffers.smoke.read },
-                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
-                ], config.gridX / 8, config.gridY / 8);
-
-                computeShaders.bakeLighting.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: buffers.smoke.read },
-                    { buffer: buffers.temperature.read },
-                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
-                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
-
-                // RENDERING
-
-                computeShaders.renderDefault.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    context.getCurrentTexture().createView(),
-                    // { buffer: buffers.smoke.read },
-                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
-                ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
-
-            } else if  (config.renderMode == "Fuel shaded") {
-                // LIGHTING
-
-                computeShaders.lightingFuel.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: lightingPrimaryUni.gpuBuffer },
-                    { buffer: buffers.velocity.read },
-                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
-                ], config.gridX / 8, config.gridY / 8);
-
-                computeShaders.lightingFuel.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    { buffer: lightingFillUni.gpuBuffer },
-                    { buffer: buffers.velocity.read },
-                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
-                ], config.gridX / 8, config.gridY / 8);
-
-                // RENDERING
-
-                computeShaders.renderFuel.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    context.getCurrentTexture().createView(),
-                    { buffer: buffers.velocity.read },
-                    { buffer: buffers.smoke.write }, // Reuse smoke buffer
-                ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
-
-
-            } else if (config.renderMode == "Fuel temperature") {
-
-                computeShaders.renderFuelTemperature.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    context.getCurrentTexture().createView(),
-                    { buffer: buffers.velocity.read },
-                    { buffer: buffers.temperature.read },
-                ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
-
-            } else if (config.renderMode == "Pressure") {
-
-                computeShaders.renderPressure.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    context.getCurrentTexture().createView(),
                     { buffer: buffers.pressure },
-                    { buffer: buffers.multigrid[Math.min(config.multigridMaxLevel, config.debugMultigridLevel)].even },
-                ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+                    { buffer: buffers.velocity.read }, // read/write
+                ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
 
-            } else if (config.renderMode == "Divergence") {
+                if (config.enable_vorticity) {
+                    computeShaders.vorticity.computePass(device, passEncoder, [
+                        { buffer: uniformBuffer },
+                        { buffer: buffers.velocity.read },
+                        { buffer: buffers.temperature.write }, // Reuse temperature buffer
+                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
 
-                // computeShaders.fillGradient.computePass(device, passEncoder, [
-                //     { buffer: uniformBuffer },
-                //     { buffer: buffers.divergence },
-                // ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+                    computeShaders.vorticityConfinment.computePass(device, passEncoder, [
+                        { buffer: uniformBuffer },
+                        { buffer: buffers.velocity.read }, // read/write
+                        { buffer: buffers.temperature.write }, // Reuse temperature buffer
+                    ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+                }
 
-                computeShaders.renderDivergence.computePass(device, passEncoder, [
-                    { buffer: uniformBuffer },
-                    context.getCurrentTexture().createView(),
-                    { buffer: buffers.smoke.write }, // Reuse buffer
-                    { buffer: buffers.multigrid[Math.min(config.multigridMaxLevel, config.debugMultigridLevel)].even },
-                ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+                if (renderOnThisFrame) {
+                    // console.log("Render");
+                    if (config.renderMode == "Normal") {
+                        computeShaders.lighting.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: lightingPrimaryUni.gpuBuffer },
+                            { buffer: buffers.smoke.read },
+                            { buffer: buffers.smoke.write }, // Reuse smoke buffer
+                        ], config.gridX / 8, config.gridY / 8);
 
-            } else {
-                throw new Error(`<p>Unknown render mode:</p><p>${config.renderMode}</p>`);
+                        computeShaders.lighting.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: lightingFillUni.gpuBuffer },
+                            { buffer: buffers.smoke.read },
+                            { buffer: buffers.smoke.write }, // Reuse smoke buffer
+                        ], config.gridX / 8, config.gridY / 8);
+
+                        computeShaders.bakeLighting.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: buffers.smoke.read },
+                            { buffer: buffers.temperature.read },
+                            { buffer: buffers.smoke.write }, // Reuse smoke buffer
+                        ], config.gridX / 4, config.gridY / 4, config.gridZ / 4);
+
+                        computeShaders.renderDefault.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: buffers.smoke.write }, // Reuse smoke buffer
+                            { buffer: buffers.original },
+                            // context.getCurrentTexture().createView(),
+                        ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+
+                        // 2x box blur
+                        computeShaders.boxBlurHorizontal.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: buffers.original },
+                            { buffer: buffers.blurredA },
+                        ], Math.ceil(canvas.height / 64));
+
+                        computeShaders.boxBlurVertical.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: buffers.blurredA },
+                            { buffer: buffers.blurredB },
+                        ], Math.ceil(canvas.width / 64));
+
+                        computeShaders.boxBlurHorizontal.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: buffers.blurredB },
+                            { buffer: buffers.blurredA },
+                        ], Math.ceil(canvas.height / 64));
+
+                        computeShaders.boxBlurVertical.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: buffers.blurredA },
+                            { buffer: buffers.blurredB },
+                        ], Math.ceil(canvas.width / 64));
+
+                        computeShaders.composite.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: buffers.original },
+                            { buffer: buffers.blurredB },
+                            context.getCurrentTexture().createView(),
+                        ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+
+                    } else if  (config.renderMode == "Fuel shaded") {
+                        // LIGHTING
+
+                        computeShaders.lightingFuel.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: lightingPrimaryUni.gpuBuffer },
+                            { buffer: buffers.velocity.read },
+                            { buffer: buffers.smoke.write }, // Reuse smoke buffer
+                        ], config.gridX / 8, config.gridY / 8);
+
+                        computeShaders.lightingFuel.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            { buffer: lightingFillUni.gpuBuffer },
+                            { buffer: buffers.velocity.read },
+                            { buffer: buffers.smoke.write }, // Reuse smoke buffer
+                        ], config.gridX / 8, config.gridY / 8);
+
+                        computeShaders.renderFuel.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            context.getCurrentTexture().createView(),
+                            { buffer: buffers.velocity.read },
+                            { buffer: buffers.smoke.write }, // Reuse smoke buffer
+                        ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+
+                    } else if (config.renderMode == "Fuel temperature") {
+
+                        computeShaders.renderFuelTemperature.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            context.getCurrentTexture().createView(),
+                            { buffer: buffers.velocity.read },
+                            { buffer: buffers.temperature.read },
+                        ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+
+                    } else if (config.renderMode == "Pressure") {
+
+                        computeShaders.renderPressure.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            context.getCurrentTexture().createView(),
+                            { buffer: buffers.pressure },
+                            { buffer: buffers.multigrid[Math.min(config.multigridMaxLevel, config.debugMultigridLevel)].even },
+                        ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+
+                    } else if (config.renderMode == "Divergence") {
+
+                        computeShaders.renderDivergence.computePass(device, passEncoder, [
+                            { buffer: uniformBuffer },
+                            context.getCurrentTexture().createView(),
+                            { buffer: buffers.smoke.write }, // Reuse buffer
+                            { buffer: buffers.multigrid[Math.min(config.multigridMaxLevel, config.debugMultigridLevel)].even },
+                        ], Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+
+                    } else {
+                        throw new Error(`<p>Unknown render mode:</p><p>${config.renderMode}</p>`);
+                    }
+
+
+                }
             }
 
             passEncoder.end();
             const commandBuffer = encoder.finish();
             device.queue.submit([commandBuffer]);
+            // await device.queue.onSubmittedWorkDone();
             // console.log(time)
 
             const webgpuError = await device.popErrorScope();
             if (webgpuError) {
                 displayError(`<p>WebGPU error:</p><p>${webgpuError.message}</p>`);
                 throw new Error(`<p>WebGPU error:</p><p>${webgpuError.message}</p>`);
-            } else {
-                requestAnimationFrame(render)
             }
             device.pushErrorScope('validation');
 
             javascriptTimer.addSample(performance.now() - startTime);
             configuration.update("javascriptTime", javascriptTimer.get().toFixed(1));
+            requestAnimationFrame(render)
         } catch (e) {
             displayError(e.message);
             throw e;

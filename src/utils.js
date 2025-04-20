@@ -132,7 +132,7 @@ class Timer {
 
     getTimeAndDelta(speed) {
         let now = performance.now();
-        let delta = Math.min(1000 / 1, now - this.prev) * speed;
+        let delta = Math.min(1000 / 10, now - this.prev) * speed;
         this.prev = now;
         this.currentTime += delta;
         return [this.currentTime / 1000, delta / 1000];

@@ -290,7 +290,7 @@ function createUI(config, configuration) {
     const menuDiv = document.getElementById("menu");
 
     const settingsSection = createSection({parent: menuDiv, labelText: "General"});
-    const renderingSection = createSection({parent: menuDiv, labelText: "Rendering"});
+    const renderingSection = createSection({parent: menuDiv, labelText: "Rendering", closed: true});
     const brushSection = createSection({parent: menuDiv, labelText: "Brush", closed: true});
     const cameraSection = createSection({parent: menuDiv, labelText: "Camera", closed: true});
     const simSection = createSection({parent: menuDiv, labelText: "Simulation", closed: true});
@@ -303,7 +303,7 @@ function createUI(config, configuration) {
     });
     createSelect({ parent: settingsSection, configuration,
         key: "scene", labelText: "Scene",
-        options: ["None", "Rotating smoke emitter", "Rotating fire emitter", "5 spheres (uses brush settings)"].map(
+        options: ["None", "Rotating smoke emitter", "Rotating fire emitter", "5 spheres (uses brush settings)", "Vortex"].map(
             x => ({label: x, value: x})),
         defaultValue: "Rotating fire emitter"
     });
@@ -354,20 +354,36 @@ function createUI(config, configuration) {
         key: "blackbodyBrightness", labelText: "Fire brightness",
         minValue: 0.0, maxValue: 10.0, defaultValue: 1.0, step: 0.01
     });
+    createSlider({ parent: renderingSection, configuration,
+        key: "glowRadius", labelText: "Glow radius %",
+        minValue: 0, maxValue: 100, defaultValue: 25, step: 0.01
+    });
+    createSlider({ parent: renderingSection, configuration,
+        key: "glowStrength", labelText: "Glow strength",
+        minValue: 0, maxValue: 2, defaultValue: 0.1, step: 0.01
+    });
+    createSlider({ parent: renderingSection, configuration,
+        key: "glowGamma", labelText: "Glow gamma",
+        minValue: 1, maxValue: 10, defaultValue: 1.75, step: 0.01
+    });
 
     // SIM SECTION
 
     createSlider({ parent: simSection, configuration,
-        key: "simulation_scale", labelText: "Simulation scale",
-        minValue: 1, maxValue: 200, defaultValue: 4.0, step: 0.1
+        key: "subframes", labelText: "Subframes",
+        minValue: 1, maxValue: 10, defaultValue: 1, step: 1
     });
     createSlider({ parent: simSection, configuration,
         key: "pressure_iterations", labelText: "Solver iterations",
         minValue: 2, maxValue: 200, defaultValue: 4, step: 1
     });
+    createSlider({ parent: simSection, configuration,
+        key: "simulation_scale", labelText: "Simulation scale",
+        minValue: 1, maxValue: 200, defaultValue: 4.0, step: 0.1
+    });
     createCheckbox({ parent: simSection, configuration,
         key: "enable_vorticity", labelText: "Enable vorticity",
-        defaultValue: true
+        defaultValue: false
     });
     createSlider({ parent: simSection, configuration,
         key: "vorticity", labelText: "Vorticity amount",
@@ -411,7 +427,7 @@ function createUI(config, configuration) {
     });
     createSlider({ parent: simSection, configuration,
         key: "boyancy", labelText: "Boyancy",
-        minValue: 0, maxValue: 5, defaultValue: 1.0, step: 0.001
+        minValue: 0, maxValue: 5, defaultValue: .5, step: 0.001
     });
 
     // CAMERA SECTION
@@ -453,7 +469,7 @@ function createUI(config, configuration) {
     });
     createSlider({ parent: brushSection, configuration,
         key: "brushTemperatureAmount", labelText: "Brush temperature",
-        minValue: 0.0, maxValue: 100.0, defaultValue: 1., step: 0.01
+        minValue: -100.0, maxValue: 100.0, defaultValue: 1., step: 0.01
     });
 
     // DEBUG SECTION
